@@ -82,11 +82,30 @@ impl InnerConnection {
         }
     }
 
-    pub fn prepare<'a>(&mut self, conn: &'a Connection, sql: &str) -> Result<Statement<'a>> {
+    pub fn _prepare<'a>(&mut self, conn: &'a Connection, sql: &str) -> Result<Statement<'a>> {
         let mut c_stmt: ffi::duckdb_prepared_statement = ptr::null_mut();
         let c_str = CString::new(sql).unwrap();
         let r = unsafe { ffi::duckdb_prepare(self.con, c_str.as_ptr() as *const c_char, &mut c_stmt) };
         result_from_duckdb_prepare(r, c_stmt)?;
+        Ok(Statement::new(conn, unsafe { RawStatement::new(c_stmt) }))
+    }
+
+    pub fn prepare<'a>(&mut self, conn: &'a Connection, sql: &str) -> Result<Statement<'a>> {
+        let c_str = CString::new(sql).unwrap();
+
+        let mut c_stmts: ffi::duckdb_extracted_statements = ptr::null_mut();
+        let mut c_stmt: ffi::duckdb_prepared_statement = ptr::null_mut();
+        let con = self.con;
+        unsafe {
+            let count = ffi::duckdb_extract_statements(con, c_str.as_ptr() as *const c_char, &mut c_stmts);
+            for i in 0..(count - 1) {
+                let mut out_result: ffi::duckdb_result = mem::zeroed();
+                let _res = ffi::duckdb_prepare_extracted_statement(con, c_stmts, i, &mut c_stmt);
+                ffi::duckdb_execute_prepared(c_stmt, &mut out_result);
+                ffi::duckdb_destroy_prepare(&mut c_stmt);
+            }
+            ffi::duckdb_prepare_extracted_statement(con, c_stmts, count - 1, &mut c_stmt);
+        }
         Ok(Statement::new(conn, unsafe { RawStatement::new(c_stmt) }))
     }
 
