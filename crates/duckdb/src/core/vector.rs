@@ -191,6 +191,22 @@ impl ListVector {
         FlatVector::with_capacity(unsafe { duckdb_list_vector_get_child(self.entries.ptr) }, capacity)
     }
 
+    /// Take the child as [StructVector].
+    pub fn struct_child(&self, capacity: usize) -> StructVector {
+        self.reserve(capacity);
+        StructVector::from(unsafe { duckdb_list_vector_get_child(self.entries.ptr) })
+    }
+
+    /// Take the child as [ArrayVector].
+    pub fn array_child(&self) -> ArrayVector {
+        ArrayVector::from(unsafe { duckdb_list_vector_get_child(self.entries.ptr) })
+    }
+
+    /// Take the child as [ListVector].
+    pub fn list_child(&self) -> ListVector {
+        ListVector::from(unsafe { duckdb_list_vector_get_child(self.entries.ptr) })
+    }
+
     /// Set primitive data to the child node.
     pub fn set_child<T: Copy>(&self, data: &[T]) {
         self.child(data.len()).copy(data);
@@ -285,8 +301,11 @@ impl From<duckdb_vector> for StructVector {
 
 impl StructVector {
     /// Returns the child by idx in the list vector.
-    pub fn child(&self, idx: usize) -> FlatVector {
-        FlatVector::from(unsafe { duckdb_struct_vector_get_child(self.ptr, idx as u64) })
+    pub fn child(&self, idx: usize, capacity: usize) -> FlatVector {
+        FlatVector::with_capacity(
+            unsafe { duckdb_struct_vector_get_child(self.ptr, idx as u64) },
+            capacity,
+        )
     }
 
     /// Take the child as [StructVector].
