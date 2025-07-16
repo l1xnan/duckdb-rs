@@ -79,6 +79,7 @@ pub use crate::{
     config::{AccessMode, Config, DefaultNullOrder, DefaultOrder},
     error::Error,
     ffi::ErrorCode,
+    inner_connection::InterruptHandle,
     params::{params_from_iter, Params, ParamsFromIter},
     row::{AndThenRows, Map, MappedRows, Row, RowIndex, Rows},
     statement::Statement,
@@ -253,8 +254,8 @@ impl Connection {
     /// Will return `Err` if `path` cannot be converted to a C-compatible
     /// string or if the underlying DuckDB open call fails.
     #[inline]
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Connection> {
-        Connection::open_with_flags(path, Config::default())
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        Self::open_with_flags(path, Config::default())
     }
 
     /// Open a new connection to an in-memory DuckDB database.
@@ -263,8 +264,8 @@ impl Connection {
     ///
     /// Will return `Err` if the underlying DuckDB open call fails.
     #[inline]
-    pub fn open_in_memory() -> Result<Connection> {
-        Connection::open_in_memory_with_flags(Config::default())
+    pub fn open_in_memory() -> Result<Self> {
+        Self::open_in_memory_with_flags(Config::default())
     }
 
     /// Open a new connection to an ffi database.
@@ -276,8 +277,8 @@ impl Connection {
     ///
     /// Need to pass in a valid db instance
     #[inline]
-    pub unsafe fn open_from_raw(raw: ffi::duckdb_database) -> Result<Connection> {
-        InnerConnection::new(raw, false).map(|db| Connection {
+    pub unsafe fn open_from_raw(raw: ffi::duckdb_database) -> Result<Self> {
+        InnerConnection::new(raw, false).map(|db| Self {
             db: RefCell::new(db),
             cache: StatementCache::with_capacity(STATEMENT_CACHE_DEFAULT_CAPACITY),
             path: None, // Can we know the path from connection?
@@ -291,7 +292,7 @@ impl Connection {
     /// Will return `Err` if `path` cannot be converted to a C-compatible
     /// string or if the underlying DuckDB open call fails.
     #[inline]
-    pub fn open_with_flags<P: AsRef<Path>>(path: P, config: Config) -> Result<Connection> {
+    pub fn open_with_flags<P: AsRef<Path>>(path: P, config: Config) -> Result<Self> {
         #[cfg(unix)]
         fn path_to_cstring(p: &Path) -> Result<CString> {
             use std::os::unix::ffi::OsStrExt;
@@ -306,7 +307,7 @@ impl Connection {
 
         let c_path = path_to_cstring(path.as_ref())?;
         let config = config.with("duckdb_api", "rust").unwrap();
-        InnerConnection::open_with_flags(&c_path, config).map(|db| Connection {
+        InnerConnection::open_with_flags(&c_path, config).map(|db| Self {
             db: RefCell::new(db),
             cache: StatementCache::with_capacity(STATEMENT_CACHE_DEFAULT_CAPACITY),
             path: Some(path.as_ref().to_path_buf()),
@@ -319,8 +320,8 @@ impl Connection {
     ///
     /// Will return `Err` if the underlying DuckDB open call fails.
     #[inline]
-    pub fn open_in_memory_with_flags(config: Config) -> Result<Connection> {
-        Connection::open_with_flags(":memory:", config)
+    pub fn open_in_memory_with_flags(config: Config) -> Result<Self> {
+        Self::open_with_flags(":memory:", config)
     }
 
     /// Convenience method to run multiple SQL statements (that cannot take any
@@ -532,6 +533,30 @@ impl Connection {
         self.db.borrow_mut().appender(self, table, schema)
     }
 
+    /// Get a handle to interrupt long-running queries.
+    ///
+    /// ## Example
+    ///
+    /// ```rust,no_run
+    /// # use duckdb::{Connection, Result};
+    /// fn run_query(conn: Connection) -> Result<()> {
+    ///   let interrupt_handle = conn.interrupt_handle();
+    ///   let join_handle = std::thread::spawn(move || { conn.execute("expensive query", []) });
+    ///
+    ///   // Arbitrary wait for query to start
+    ///   std::thread::sleep(std::time::Duration::from_millis(100));
+    ///
+    ///   interrupt_handle.interrupt();
+    ///
+    ///   let query_result = join_handle.join().unwrap();
+    ///   assert!(query_result.is_err());
+    ///
+    ///   Ok(())
+    /// }
+    pub fn interrupt_handle(&self) -> std::sync::Arc<InterruptHandle> {
+        self.db.borrow().get_interrupt_handle()
+    }
+
     /// Close the DuckDB connection.
     ///
     /// This is functionally equivalent to the `Drop` implementation for
@@ -543,7 +568,7 @@ impl Connection {
     /// Will return `Err` if the underlying DuckDB call fails.
     #[inline]
     #[allow(clippy::result_large_err)]
-    pub fn close(self) -> Result<(), (Connection, Error)> {
+    pub fn close(self) -> Result<(), (Self, Error)> {
         let r = self.db.borrow_mut().close();
         r.map_err(move |err| (self, err))
     }
@@ -558,7 +583,7 @@ impl Connection {
     /// Creates a new connection to the already-opened database.
     pub fn try_clone(&self) -> Result<Self> {
         let inner = self.db.borrow().try_clone()?;
-        Ok(Connection {
+        Ok(Self {
             db: RefCell::new(inner),
             cache: StatementCache::with_capacity(STATEMENT_CACHE_DEFAULT_CAPACITY),
             path: self.path.clone(),
@@ -1026,8 +1051,8 @@ mod test {
         impl fmt::Display for CustomError {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
                 match *self {
-                    CustomError::SomeError => write!(f, "my custom error"),
-                    CustomError::Sqlite(ref se) => write!(f, "my custom error: {se}"),
+                    Self::SomeError => write!(f, "my custom error"),
+                    Self::Sqlite(ref se) => write!(f, "my custom error: {se}"),
                 }
             }
         }
@@ -1039,15 +1064,15 @@ mod test {
 
             fn cause(&self) -> Option<&dyn StdError> {
                 match *self {
-                    CustomError::SomeError => None,
-                    CustomError::Sqlite(ref se) => Some(se),
+                    Self::SomeError => None,
+                    Self::Sqlite(ref se) => Some(se),
                 }
             }
         }
 
         impl From<Error> for CustomError {
-            fn from(se: Error) -> CustomError {
-                CustomError::Sqlite(se)
+            fn from(se: Error) -> Self {
+                Self::Sqlite(se)
             }
         }
 
@@ -1336,6 +1361,36 @@ mod test {
         assert_eq!(DatabaseName::Temp.to_string(), "temp");
         assert_eq!(DatabaseName::Attached("abc").to_string(), "abc");
         Ok(())
+    }
+
+    #[test]
+    fn test_interrupt() -> Result<()> {
+        let db = checked_memory_handle();
+        let db_interrupt = db.interrupt_handle();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut stmt = db
+                .prepare("select count(*) from range(10000000) t1, range(1000000) t2")
+                .unwrap();
+            tx.send(stmt.execute([])).unwrap();
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        db_interrupt.interrupt();
+
+        let result = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(result.is_err_and(|err| err.to_string().contains("INTERRUPT")));
+        Ok(())
+    }
+
+    #[test]
+    fn test_interrupt_on_dropped_db() {
+        let db = checked_memory_handle();
+        let db_interrupt = db.interrupt_handle();
+
+        drop(db);
+        db_interrupt.interrupt();
     }
 
     #[cfg(feature = "bundled")]
