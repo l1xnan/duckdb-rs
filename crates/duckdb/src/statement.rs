@@ -349,6 +349,33 @@ impl Statement<'_> {
         self.query(params)?.get_expected_row().and_then(f)
     }
 
+    /// Convenience method to execute a query that is expected to return exactly
+    /// one row.
+    ///
+    /// Returns `Err(QueryReturnedMoreThanOneRow)` if the query returns more than one row.
+    ///
+    /// Returns `Err(QueryReturnedNoRows)` if no results are returned. If the
+    /// query truly is optional, you can call
+    /// [`.optional()`](crate::OptionalExt::optional) on the result of
+    /// this to get a `Result<Option<T>>` (requires that the trait
+    /// `duckdb::OptionalExt` is imported).
+    ///
+    /// # Failure
+    ///
+    /// Will return `Err` if the underlying DuckDB call fails.
+    pub fn query_one<T, P, F>(&mut self, params: P, f: F) -> Result<T>
+    where
+        P: Params,
+        F: FnOnce(&Row<'_>) -> Result<T>,
+    {
+        let mut rows = self.query(params)?;
+        let row = rows.get_expected_row().and_then(f)?;
+        if rows.next()?.is_some() {
+            return Err(Error::QueryReturnedMoreThanOneRow);
+        }
+        Ok(row)
+    }
+
     /// Return the row count
     #[inline]
     pub fn row_count(&self) -> usize {
@@ -635,9 +662,8 @@ mod test {
 
         let mut stmt = db.prepare("SELECT id FROM test where name = ?")?;
         {
-            let mut rows = stmt.query([&"one"])?;
-            let id: Result<i32> = rows.next()?.unwrap().get(0);
-            assert_eq!(Ok(1), id);
+            let id: i32 = stmt.query_one([&"one"], |r| r.get(0))?;
+            assert_eq!(id, 1);
         }
         Ok(())
     }
@@ -826,6 +852,71 @@ mod test {
     }
 
     #[test]
+    fn test_query_one() -> Result<()> {
+        let db = Connection::open_in_memory()?;
+        let sql = "BEGIN;
+                   CREATE TABLE foo(x INTEGER, y INTEGER);
+                   INSERT INTO foo VALUES(1, 3);
+                   INSERT INTO foo VALUES(2, 4);
+                   END;";
+        db.execute_batch(sql)?;
+
+        // Exactly one row
+        let y: i32 = db
+            .prepare("SELECT y FROM foo WHERE x = ?")?
+            .query_one([1], |r| r.get(0))?;
+        assert_eq!(y, 3);
+
+        // No rows
+        let res: Result<i32> = db
+            .prepare("SELECT y FROM foo WHERE x = ?")?
+            .query_one([99], |r| r.get(0));
+        assert_eq!(res.unwrap_err(), Error::QueryReturnedNoRows);
+
+        // Multiple rows
+        let res: Result<i32> = db.prepare("SELECT y FROM foo")?.query_one([], |r| r.get(0));
+        assert_eq!(res.unwrap_err(), Error::QueryReturnedMoreThanOneRow);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_one_optional() -> Result<()> {
+        use crate::OptionalExt;
+
+        let db = Connection::open_in_memory()?;
+        let sql = "BEGIN;
+                   CREATE TABLE foo(x INTEGER, y INTEGER);
+                   INSERT INTO foo VALUES(1, 3);
+                   INSERT INTO foo VALUES(2, 4);
+                   END;";
+        db.execute_batch(sql)?;
+
+        // Exactly one row
+        let y: Option<i32> = db
+            .prepare("SELECT y FROM foo WHERE x = ?")?
+            .query_one([1], |r| r.get(0))
+            .optional()?;
+        assert_eq!(y, Some(3));
+
+        // No rows
+        let y: Option<i32> = db
+            .prepare("SELECT y FROM foo WHERE x = ?")?
+            .query_one([99], |r| r.get(0))
+            .optional()?;
+        assert_eq!(y, None);
+
+        // Multiple rows - should still return error (not converted by optional)
+        let res = db
+            .prepare("SELECT y FROM foo")?
+            .query_one([], |r| r.get::<_, i32>(0))
+            .optional();
+        assert_eq!(res.unwrap_err(), Error::QueryReturnedMoreThanOneRow);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_query_by_column_name() -> Result<()> {
         let db = Connection::open_in_memory()?;
         let sql = "BEGIN;
@@ -889,7 +980,6 @@ mod test {
     }
 
     #[test]
-    #[ignore]
     fn test_bind_parameters() -> Result<()> {
         let db = Connection::open_in_memory()?;
         // dynamic slice:
@@ -904,8 +994,8 @@ mod test {
         })?;
         db.query_row("SELECT ?1, ?2, ?3", params_from_iter(data), |row| row.get::<_, u8>(0))?;
 
-        use std::collections::BTreeSet;
-        let data: BTreeSet<String> = ["one", "two", "three"].iter().map(|s| (*s).to_string()).collect();
+        let data: std::collections::BTreeSet<String> =
+            ["one", "two", "three"].iter().map(|s| (*s).to_string()).collect();
         db.query_row("SELECT ?1, ?2, ?3", params_from_iter(&data), |row| {
             row.get::<_, String>(0)
         })?;
@@ -944,22 +1034,6 @@ mod test {
     }
 
     #[test]
-    #[ignore]
-    fn test_utf16_conversion() -> Result<()> {
-        let db = Connection::open_in_memory()?;
-        db.pragma_update(None, "encoding", &"UTF-16le")?;
-        let encoding: String = db.pragma_query_value(None, "encoding", |row| row.get(0))?;
-        assert_eq!("UTF-16le", encoding);
-        db.execute_batch("CREATE TABLE foo(x TEXT)")?;
-        let expected = "テスト";
-        db.execute("INSERT INTO foo(x) VALUES (?)", [&expected])?;
-        let actual: String = db.query_row("SELECT x FROM foo", [], |row| row.get(0))?;
-        assert_eq!(expected, actual);
-        Ok(())
-    }
-
-    #[test]
-    #[ignore]
     fn test_nul_byte() -> Result<()> {
         let db = Connection::open_in_memory()?;
         let expected = "a\x00b";
