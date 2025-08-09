@@ -34,8 +34,8 @@ pub struct RawStatement {
 
 impl RawStatement {
     #[inline]
-    pub unsafe fn new(stmt: ffi::duckdb_prepared_statement) -> RawStatement {
-        RawStatement {
+    pub unsafe fn new(stmt: ffi::duckdb_prepared_statement) -> Self {
+        Self {
             ptr: stmt,
             result: None,
             schema: None,
@@ -71,7 +71,7 @@ impl RawStatement {
 
     #[inline]
     pub fn result_unwrap(&self) -> ffi::duckdb_arrow {
-        self.result.unwrap()
+        self.result.expect("The statement was not executed yet")
     }
 
     #[inline]
@@ -183,7 +183,7 @@ impl RawStatement {
                 // Therefore, we return None when encountering this error.
                 match err {
                     polars::error::PolarsError::ComputeError(_) => return None,
-                    _ => panic!("Failed to import arrow2 Array from C: {}", err),
+                    _ => panic!("Failed to import arrow2 Array from C: {err}"),
                 }
             }
 
@@ -198,6 +198,8 @@ impl RawStatement {
         }
     }
 
+    // FIXME(mlafeldt): This currently panics if the query has not been executed yet.
+    // The C API doesn't have a function to get the column count without executing the query first.
     #[inline]
     pub fn column_count(&self) -> usize {
         unsafe { ffi::duckdb_arrow_column_count(self.result_unwrap()) as usize }
@@ -211,12 +213,6 @@ impl RawStatement {
     #[inline]
     pub fn schema(&self) -> SchemaRef {
         self.schema.clone().unwrap()
-    }
-
-    #[inline]
-    #[allow(dead_code)]
-    pub fn column_decltype(&self, _idx: usize) -> Option<&CStr> {
-        panic!("not implemented")
     }
 
     #[inline]

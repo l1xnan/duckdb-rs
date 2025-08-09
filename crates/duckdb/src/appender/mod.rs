@@ -161,9 +161,7 @@ impl Appender<'_> {
 impl Drop for Appender<'_> {
     fn drop(&mut self) {
         if !self.app.is_null() {
-            let _ = self.flush(); // can't safely handle failures here
             unsafe {
-                ffi::duckdb_appender_close(self.app);
                 ffi::duckdb_appender_destroy(&mut self.app);
             }
         }
@@ -178,7 +176,7 @@ impl fmt::Debug for Appender<'_> {
 
 #[cfg(test)]
 mod test {
-    use crate::{Connection, Result};
+    use crate::{params, Connection, Error, Result};
 
     #[test]
     fn test_append_one_row() -> Result<()> {
@@ -210,10 +208,8 @@ mod test {
         Ok(())
     }
 
-    // Waiting https://github.com/duckdb/duckdb/pull/3405
     #[cfg(feature = "uuid")]
     #[test]
-    #[ignore = "not supported for now"]
     fn test_append_uuid() -> Result<()> {
         use uuid::Uuid;
 
@@ -266,7 +262,6 @@ mod test {
     #[test]
     #[cfg(feature = "chrono")]
     fn test_append_datetime() -> Result<()> {
-        use crate::params;
         use chrono::{NaiveDate, NaiveDateTime};
 
         let db = Connection::open_in_memory()?;
@@ -287,8 +282,7 @@ mod test {
     }
 
     #[test]
-    fn test_appender_error() -> Result<(), crate::Error> {
-        use crate::params;
+    fn test_appender_error() -> Result<()> {
         let conn = Connection::open_in_memory()?;
         conn.execute(
             r"CREATE TABLE foo (
@@ -300,12 +294,44 @@ mod test {
         )?;
         let mut appender = conn.appender("foo")?;
         match appender.append_row(params!["foo"]) {
-            Err(crate::Error::DuckDBFailure(.., Some(msg))) => {
+            Err(Error::DuckDBFailure(.., Some(msg))) => {
                 assert_eq!(msg, "Call to EndRow before all columns have been appended to!")
             }
-            Err(err) => panic!("unexpected error: {:?}", err),
+            Err(err) => panic!("unexpected error: {err:?}"),
             Ok(_) => panic!("expected an error but got Ok"),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_appender_foreign_key_constraint() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            r"
+            CREATE TABLE parent (id INTEGER PRIMARY KEY);
+            CREATE TABLE child (
+                id INTEGER,
+                parent_id INTEGER,
+                FOREIGN KEY (parent_id) REFERENCES parent(id)
+            );",
+        )?;
+        conn.execute("INSERT INTO parent VALUES (1)", [])?;
+
+        let mut appender = conn.appender("child")?;
+        appender.append_row(params![1, 999])?; // Invalid parent_id
+
+        // Foreign key constraint should be checked during flush
+        match appender.flush() {
+            Err(Error::DuckDBFailure(_, Some(msg))) => {
+                assert_eq!(
+                    msg,
+                    "Violates foreign key constraint because key \"id: 999\" does not exist in the referenced table"
+                );
+            }
+            Err(e) => panic!("Expected foreign key constraint error, got: {e:?}"),
+            Ok(_) => panic!("Expected foreign key constraint error, but flush succeeded"),
+        }
+
         Ok(())
     }
 }
