@@ -83,7 +83,7 @@ pub use crate::{
     params::{params_from_iter, Params, ParamsFromIter},
     row::{AndThenRows, Map, MappedRows, Row, RowIndex, Rows},
     statement::Statement,
-    transaction::{DropBehavior, Savepoint, Transaction, TransactionBehavior},
+    transaction::{DropBehavior, Transaction, TransactionBehavior},
     types::ToSql,
 };
 #[cfg(feature = "polars")]
@@ -133,8 +133,6 @@ pub mod vscalar;
 
 #[cfg(test)]
 mod test_all_types;
-
-pub(crate) mod util;
 
 // Number of cached prepared statements we'll hold on to.
 const STATEMENT_CACHE_DEFAULT_CAPACITY: usize = 16;
@@ -982,14 +980,13 @@ mod test {
     }
 
     #[test]
-    #[ignore = "not supported"]
-    fn test_statement_debugging() -> Result<()> {
+    #[should_panic(expected = "not supported")]
+    fn test_statement_debugging() {
         let db = checked_memory_handle();
         let query = "SELECT 12345";
-        let stmt = db.prepare(query)?;
+        let stmt = db.prepare(query).unwrap();
 
         assert!(format!("{stmt:?}").contains(query));
-        Ok(())
     }
 
     #[test]
@@ -1240,6 +1237,32 @@ mod test {
             }
             Ok(())
         }
+
+        #[test]
+        fn test_rows_and_then_with_custom_error() -> Result<()> {
+            let db = checked_memory_handle();
+            db.execute_batch("CREATE TABLE test (value INTEGER)")?;
+            db.execute_batch("INSERT INTO test VALUES (1), (3), (5)")?;
+
+            let mut stmt = db.prepare("SELECT value FROM test ORDER BY value")?;
+            let rows = stmt.query([])?;
+
+            // Use and_then to apply custom validation with custom error type
+            let results: Vec<i32> = rows
+                .and_then(|row| -> CustomResult<i32> {
+                    let val: i32 = row.get(0)?; // duckdb::Error automatically converted via From trait
+                    if val > 10 {
+                        Err(CustomError::SomeError) // Custom application-specific error
+                    } else {
+                        Ok(val)
+                    }
+                })
+                .collect::<CustomResult<Vec<_>>>()
+                .unwrap();
+
+            assert_eq!(results, vec![1, 3, 5]);
+            Ok(())
+        }
     }
 
     #[test]
@@ -1400,6 +1423,36 @@ mod test {
         let expected: String = format!("v{}", env!("CARGO_PKG_VERSION"));
         let actual = db.version()?;
         assert_eq!(expected, actual);
+        Ok(())
+    }
+
+    #[test]
+    fn test_arrow_string_view_setting() -> Result<()> {
+        // Test that only one setting doesn't work (missing arrow_output_version)
+        {
+            let config = Config::default().with("produce_arrow_string_view", "true")?;
+            let conn = Connection::open_in_memory_with_flags(config)?;
+
+            let mut query = conn.prepare("SELECT 'test'::varchar AS str")?;
+            let arrow = query.query_arrow([])?;
+
+            let batch = arrow.into_iter().next().expect("Expected at least one batch");
+            assert_eq!(batch.schema().field(0).data_type(), &DataType::Utf8);
+        }
+
+        {
+            let config = Config::default()
+                .with("produce_arrow_string_view", "true")?
+                .with("arrow_output_version", "1.4")?;
+            let conn = Connection::open_in_memory_with_flags(config)?;
+
+            let mut query = conn.prepare("SELECT 'test'::varchar AS str")?;
+            let arrow = query.query_arrow([])?;
+
+            let batch = arrow.into_iter().next().expect("Expected at least one batch");
+            assert_eq!(batch.schema().field(0).data_type(), &DataType::Utf8View);
+        }
+
         Ok(())
     }
 }
